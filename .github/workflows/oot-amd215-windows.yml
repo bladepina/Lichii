@@ -1,0 +1,95 @@
+name: OoT AMD273 + PR215 Windows test
+
+on:
+  push:
+    branches:
+      - test/amd273-pr215
+    paths:
+      - 'src/**'
+      - '.github/workflows/oot-amd215-windows.yml'
+      - 'CMakeLists.txt'
+      - 'CMakeModules/**'
+      - 'externals/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows-msvc:
+    name: Windows x64 MSVC (AMD273 + PR215)
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - name: Check out test branch
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtcharts
+          cache: true
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: ./tools/windows/install-vulkan-sdk.ps1
+
+      - name: Confirm Vulkan tools
+        shell: pwsh
+        run: glslangValidator --version
+
+      - name: Restore CMake/CPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: .cache/cpm
+          key: amd215-windows-cpm-${{ hashFiles('cpmfile.json','CMakeLists.txt','CMakeModules/CPM*.cmake','externals/**/CMakeLists.txt','src/**/CMakeLists.txt') }}
+          restore-keys: |
+            amd215-windows-cpm-
+
+      - name: Configure Release (MSVC)
+        shell: bash
+        run: >-
+          cmake -S . -B build/release -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=OFF
+          -DYUZU_TESTS=OFF
+          -DYUZU_CMD=ON
+          -DYUZU_ROOM=OFF
+          -DYUZU_ROOM_STANDALONE=OFF
+          -DYUZU_USE_BUNDLED_QT=OFF
+          -DYUZU_USE_BUNDLED_SDL3=ON
+          -DENABLE_UPDATE_CHECKER=ON
+          -DLICHII_BUILD_TAG=amd273-pr215
+          -DLICHII_BUILD_PLATFORM=windows-x86_64
+          -DUSE_DISCORD_PRESENCE=OFF
+
+      - name: Build Windows binaries
+        shell: bash
+        run: cmake --build build/release --target yuzu yuzu-cmd --parallel 4
+
+      - name: Package Qt runtime
+        shell: pwsh
+        run: |
+          foreach ($exe in 'lichii.exe', 'eden-cli.exe') {
+            if (-not (Test-Path "build/release/bin/$exe")) {
+              throw "Missing build/release/bin/$exe"
+            }
+          }
+          windeployqt --release --no-translations build/release/bin/lichii.exe
+
+      - name: Upload Lichii Windows ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lichii-AMD273-PR215-Windows-MSVC
+          path: build/release/bin/
+          if-no-files-found: error
+          retention-days: 7
