@@ -1,0 +1,128 @@
+name: OoT AMD RDNA2 PR463 + PR313 - Windows x64
+
+on:
+  push:
+    branches:
+      - test/amd-oot-463-313-nov07
+    paths:
+      - 'src/**'
+      - '.github/workflows/oot-amd-rdna2-windows.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: oot-amd-rdna2-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  windows-msvc:
+    name: Windows x64 MSVC - RX 6700 XT experiment
+    runs-on: windows-2022
+    timeout-minutes: 180
+    steps:
+      - name: Check out patched Lichii
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Confirm AMD test patches
+        shell: bash
+        run: |
+          grep -q 'EDEN_NX2_TC_SKIP_STALE' src/video_core/texture_cache/texture_cache_base.h
+          grep -q 'Switch2PipelineBudget' src/video_core/renderer_vulkan/vk_pipeline_cache.cpp
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.3'
+          host: windows
+          target: desktop
+          arch: win64_msvc2022_64
+          modules: qtcharts
+          cache: true
+
+      - name: Install Vulkan SDK
+        shell: pwsh
+        run: ./tools/windows/install-vulkan-sdk.ps1
+
+      - name: Confirm Vulkan tools
+        shell: pwsh
+        run: glslangValidator --version
+
+      - name: Restore CMake and CPM dependencies
+        uses: actions/cache@v4
+        with:
+          path: .cache/cpm
+          key: oot-rdna2-windows-cpm-${{ hashFiles('cpmfile.json','CMakeLists.txt','CMakeModules/CPM*.cmake','externals/**/CMakeLists.txt','src/**/CMakeLists.txt') }}
+          restore-keys: |
+            oot-rdna2-windows-cpm-
+
+      - name: Configure Release (MSVC, no PGO)
+        shell: bash
+        run: >-
+          cmake -S . -B build/release -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=OFF
+          -DYUZU_TESTS=OFF
+          -DYUZU_CMD=ON
+          -DYUZU_ROOM=OFF
+          -DYUZU_ROOM_STANDALONE=OFF
+          -DYUZU_USE_BUNDLED_QT=OFF
+          -DYUZU_USE_BUNDLED_SDL3=ON
+          -DENABLE_UPDATE_CHECKER=OFF
+          -DLICHII_BUILD_TAG=oot-amd-463-313
+          -DLICHII_BUILD_PLATFORM=windows-x86_64
+          -DUSE_DISCORD_PRESENCE=OFF
+
+      - name: Build Lichii Windows binaries
+        shell: bash
+        run: cmake --build build/release --target yuzu yuzu-cmd --parallel 4
+
+      - name: Deploy Qt dependencies and ZIP
+        shell: pwsh
+        run: |
+          foreach ($exe in 'lichii.exe', 'eden-cli.exe') {
+            if (-not (Test-Path "build/release/bin/$exe")) {
+              throw "Missing build/release/bin/$exe"
+            }
+          }
+          windeployqt --release --no-translations build/release/bin/lichii.exe
+          Compress-Archive -Path 'build/release/bin/*' -DestinationPath 'Lichii-AMD-RX6700XT-PR463-PR313-Windows.zip' -Force
+
+      - name: Upload ready-to-download Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lichii-AMD-RX6700XT-PR463-PR313-Windows
+          path: Lichii-AMD-RX6700XT-PR463-PR313-Windows.zip
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish experimental release with ZIP
+        shell: bash
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > release-notes.md <<'EOF'
+          Experimental Lichii AMD RDNA2 / Ryzen Zen 3 build for The Legend of Zelda: Ocarina of Time.
+
+          Base: zortos293/Lichii nx2 at 65e979adb3b6ce3f37b1b225c30bb91a5c1b7c0b (after official Build 95).
+          Added PR #463: skip stale guest-memory texture uploads (RX 6700 XT Castle Town reported 18.9-19.2 -> 22.8 FPS).
+          Added PR #313: memory-budgeted Switch 2 pipeline eviction, for fewer re-builds after returning to areas.
+          Already in base: GPU channel polling PR #446 and bounded shader waiting PR #465.
+          Windows x64, MSVC Release, no PGO. No game, firmware or keys included.
+
+          Experimental; unverified on the target PC. Keep official Build 95 as fallback and extract into a separate folder.
+          Use Vulkan, GPU Mode Fast, DMA Accuracy Default, GPU Fence Behavior Balanced.
+          To disable PR #463 for an A/B comparison, set EDEN_NX2_TC_SKIP_STALE=0 and restart.
+          EOF
+          gh release create "amd-oot-463-313-20261107" "Lichii-AMD-RX6700XT-PR463-PR313-Windows.zip" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Lichii AMD RX 6700 XT test - PR463 + PR313" \
+            --notes-file release-notes.md
